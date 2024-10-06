@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Advanced Multi-Layered Solar Particle Emission Simulation</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; }
+        #gui-container { position: absolute; top: 0; right: 0; }
+    </style>
+</head>
+<body>
+    <!-- Container for dat.GUI -->
+    <div id="gui-container"></div>
+
+    <!-- Include Three.js from CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- Include OrbitControls -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <!-- Include dat.GUI for controls -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.9/dat.gui.min.js"></script>
+
+    <!-- Vertex Shader for Sun Layers -->
+    <script id="sunVertexShader" type="x-shader/x-vertex">
+        varying vec2 vUv;
+        varying float vElevation;
+
+        uniform float time;
+        uniform float turbulenceStrength;
+
+        // Simplex Noise Function (2D)
+        vec3 mod289(vec3 x) {
+            return x - floor(x * (1.0 / 289.0)) * 289.0;
+        }
+
+        vec2 mod289(vec2 x) {
+            return x - floor(x * (1.0 / 289.0)) * 289.0;
+        }
+
+        vec3 permute(vec3 x) {
+            return mod289(((x*34.0)+1.0)*x);
+        }
+
+        float snoise(vec2 v){
+            const vec4 C = vec4(0.211324865405187,  // (3.0-sqrt(3.0))/6.0
+                                0.366025403784439,  // 0.5*(sqrt(3.0)-1.0)
+                                -0.577350269189626, // -1.0 + 2.0 * C.x
+                                0.024390243902439); // 1.0 / 41.0
+            vec2 i  = floor(v + dot(v, C.yy) );
+            vec2 x0 = v -   i + dot(i, C.xx);
+
+            vec2 i1;
+            i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+
+            vec4 x12 = x0.xyxy + C.xxzz;
+            x12.xy -= i1;
+
+            vec3 p = permute( permute( i.y + vec3(0.0, i1.y, 1.0 ))
+                + i.x + vec3(0.0, i1.x, 1.0 ));
+
+            vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), 
+                                    dot(x12.zw,x12.zw)), 0.0);
+            m = m*m ;
+            m = m*m ;
+
+            vec3 x = 2.0 * fract(p * C.www) - 1.0;
+            vec3 h = abs(x) - 0.5;
+            vec3 ox = floor(x + 0.5);
+            vec3 a0 = x - ox;
+
+            m *= 1.79284291400159 - 0.85373472095314 * ( a0*a0 + h*h );
+
+            vec3 g;
+            g.x  = a0.x  * x0.x + h.x * x0.y;
+            g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+
+            return 130.0 * dot(m, g);
+        }
+
+        void main() {
+            vUv = uv;
+
+            // Calculate elevation based on noise
+            float elevation = snoise(uv * 5000.0 + time * 0.5) * turbulenceStrength;
+            vElevation = elevation;
+
+            // Displace vertices based on elevation to create a dynamic surface
+            vec3 displacedPosition = position + normal * elevation * 0.2;
+
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(displacedPosition, 1.0);
+        }
+    </script>
+
+    <!-- Fragment Shader for Sun Layers -->
+    <script id="sunFragmentShader" type="x-shader/x-fragment">
+        varying vec2 vUv;
+        varying float vElevation;
+
+        uniform float time;
+
+        void main() {
+            // Enhanced color gradient with more red, orange, and yellow
+            vec3 color;
+            if (vElevation < -0.05) {
+                // Deep red areas
+                color = vec3(0.8, 0.0, 0.0);
+            } else if (vElevation < 0.02) {
+                // Red to orange transition
+                color = mix(vec3(0.9, 0.3, 0.0), vec3(1.0, 0.2, 0.0), (vElevation + 0.05) / 0.03);
+            } else if (vElevation < 0.05) {
+                // Orange to yellow transition
+                color = mix(vec3(1.0, 0.5, 0.0), vec3(1.0, 1.0, 0.0), (vElevation + 0.02) / 0.05);
+            } else {
+                // Bright yellow areas
+                color = vec3(1.0, 1.0, 0.0);
+            }
+
+            // Apply brightness based on elevation
+            float brightness = smoothstep(-0.1, 0.1, vElevation);
+            color *= brightness;
+
+            gl_FragColor = vec4(color, 1.0);
+        }
+    </script>
+
+    <!-- Vertex Shader for Particles -->
+    <script id="particleVertexShader" type="x-shader/x-vertex">
+        attribute float velocityFactor;
+        attribute float age;
+        attribute float life;
+        attribute vec3 velocity; // New velocity attribute
+        varying float vVelocityFactor;
+        varying vec3 vColor;
+        varying float vAge;
+        varying float vLife;
+
+        uniform float time;
+
+        void main() {
+            vVelocityFactor = velocityFactor;
+            vColor = color;
+            vAge = age;
+            vLife = life;
+
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            gl_PointSize = 2.0;
+        }
+    </script>
+
+    <!-- Fragment Shader for Particles -->
+    <script id="particleFragmentShader" type="x-shader/x-fragment">
+        varying float vVelocityFactor;
+        varying vec3 vColor;
+        varying float vAge;
+        varying float vLife;
+
+        void main() {
+            float dist = length(gl_PointCoord - vec2(0.5));
+            if (dist > 0.5) discard;
+
+            // Fade out particles based on age
+            float alpha = 1.0 - (vAge / vLife);
+            gl_FragColor = vec4(vColor * vVelocityFactor, alpha);
+        }
+    </script>
+
+    <script>
+        // 1. Scene Setup
+        const scene = new THREE.Scene();
+
+        // 2. Camera Setup
+        const camera = new THREE.PerspectiveCamera(
+            75, 
+            window.innerWidth / window.innerHeight, 
+            0.1, 
+            1000 
+        );
+        camera.position.set(0, 2, 5);
+
+        // 3. Renderer Setup
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // 4. OrbitControls
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+
+        // 5. Sun Layers Geometry and Materials
+
+        // Inner Core
+        const innerCoreGeometry = new THREE.SphereGeometry(0.5, 64, 64);
+        const innerCoreMaterial = new THREE.ShaderMaterial({
+            vertexShader: document.getElementById('sunVertexShader').textContent,
+            fragmentShader: document.getElementById('sunFragmentShader').textContent,
+            uniforms: {
+                time: { value: 0.0 },
+                turbulenceStrength: { value: 0.6 }
+            },
+            side: THREE.FrontSide,
+            transparent: true
+        });
+        const innerCore = new THREE.Mesh(innerCoreGeometry, innerCoreMaterial);
+        scene.add(innerCore);
+
+        // Outer Core
+        const outerCoreGeometry = new THREE.SphereGeometry(0.8, 64, 64);
+        const outerCoreMaterial = new THREE.ShaderMaterial({
+            vertexShader: document.getElementById('sunVertexShader').textContent,
+            fragmentShader: document.getElementById('sunFragmentShader').textContent,
+            uniforms: {
+                time: { value: 0.0 },
+                turbulenceStrength: { value: 1.0 }
+            },
+            side: THREE.FrontSide,
+            transparent: true
+        });
+        const outerCore = new THREE.Mesh(outerCoreGeometry, outerCoreMaterial);
+        scene.add(outerCore);
+
+        // Radiative Zone
+        const radiativeZoneGeometry = new THREE.SphereGeometry(1.2, 64, 64);
+        const radiativeZoneMaterial = new THREE.ShaderMaterial({
+            vertexShader: document.getElementById('sunVertexShader').textContent,
+            fragmentShader: document.getElementById('sunFragmentShader').textContent,
+            uniforms: {
+                time: { value: 0.0 },
+                turbulenceStrength: { value: 0.5 }
+            },
+            side: THREE.FrontSide,
+            transparent: true
+        });
+        const radiativeZone = new THREE.Mesh(radiativeZoneGeometry, radiativeZoneMaterial);
+        scene.add(radiativeZone);
+
+        // Photosphere
+        const photosphereGeometry = new THREE.SphereGeometry(1.4, 64, 64);
+        const photosphereMaterial = new THREE.ShaderMaterial({
+            vertexShader: document.getElementById('sunVertexShader').textContent,
+            fragmentShader: document.getElementById('sunFragmentShader').textContent,
+            uniforms: {
+                time: { value: 0.0 },
+                turbulenceStrength: { value: 1.5 }
+            },
+            side: THREE.FrontSide,
+            transparent: true
+        });
+        const photosphere = new THREE.Mesh(photosphereGeometry, photosphereMaterial);
+        scene.add(photosphere);
+
+        // 6. Magnetic Field Representation (Invisible Parker Spiral)
+        // We'll represent the Parker spiral mathematically and apply its influence to particles
+        // No visible geometry is added, but the field is calculated in the particle update
+
+        // Define Parker Spiral Parameters
+        const sunRotationRate = 2.9e-6; // radians per second (~Sun's rotation rate)
+        const solarWindSpeed = 400 * 1000; // m/s (approximate solar wind speed)
+        const magneticFieldStrength = 1e-5; // Tesla (approximate interplanetary magnetic field strength)
+
+        // 7. Particle System
+        const particleCount = 200000; // Increased for better visibility
+        const particlesGeometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(particleCount * 3);
+        const colors = new Float32Array(particleCount * 3);
+        const velocityFactors = new Float32Array(particleCount);
+        const ages = new Float32Array(particleCount);
+        const lives = new Float32Array(particleCount);
+        const velocities = new Float32Array(particleCount * 3); // New velocity attribute
+
+        // Define base color for particles (e.g., bright yellow)
+        const particleBaseColor = new THREE.Color(0xffff00);
+
+        // Initialize particles
+        for (let i = 0; i < particleCount; i++) {
+            // Randomly choose emission point: Outer Core (radius 0.8) or Photosphere (radius 1.4)
+            const isPhotosphere = Math.random() > 0.5;
+            const radius = isPhotosphere ? 1.4 : 0.8;
+
+            const theta = Math.random() * 2 * Math.PI;
+            const phi = Math.acos(2 * Math.random() - 1);
+
+            positions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
+            positions[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
+            positions[i * 3 + 2] = radius * Math.cos(phi);
+
+            // Assign color
+            colors[i * 3] = particleBaseColor.r;
+            colors[i * 3 + 1] = particleBaseColor.g;
+            colors[i * 3 + 2] = particleBaseColor.b;
+
+            // Initialize velocity factor
+            velocityFactors[i] = 1.0;
+
+            // Initialize age and life
+            ages[i] = 0.0;
+            lives[i] = 1000.0; // Each particle lives for 10 seconds
+
+            // Initialize velocity to zero
+            velocities[i * 3] = 0.0;
+            velocities[i * 3 + 1] = 0.0;
+            velocities[i * 3 + 2] = 0.0;
+        }
+
+        particlesGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        particlesGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        particlesGeometry.setAttribute('velocityFactor', new THREE.BufferAttribute(velocityFactors, 1));
+        particlesGeometry.setAttribute('age', new THREE.BufferAttribute(ages, 1));
+        particlesGeometry.setAttribute('life', new THREE.BufferAttribute(lives, 1));
+        particlesGeometry.setAttribute('velocity', new THREE.BufferAttribute(velocities, 3)); // Add velocity attribute
+
+        // Shader Material for Particles
+        const particleMaterial = new THREE.ShaderMaterial({
+            vertexShader: document.getElementById('particleVertexShader').textContent,
+            fragmentShader: document.getElementById('particleFragmentShader').textContent,
+            vertexColors: true,
+            transparent: true,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending
+        });
+
+        const particleSystem = new THREE.Points(particlesGeometry, particleMaterial);
+        scene.add(particleSystem);
+
+        // 8. GUI Controls
+        const gui = new dat.GUI({ autoPlace: false });
+        document.getElementById('gui-container').appendChild(gui.domElement);
+
+        const params = {
+            particleSpeed: 0.05, // Adjusted for acceleration
+            turbulenceStrength: 1.0,
+            emissionRate: 200000,
+            gravityStrength: 0.002,
+            fusionChance: 0.002 // Increased chance for visible fusion events
+	    
+        };
+
+        gui.add(params, 'particleSpeed', 0.01, 0.2).name('Particle Speed');
+        gui.add(params, 'turbulenceStrength', 0.0, 3.0).name('Turbulence Strength').onChange(function(value){
+            innerCoreMaterial.uniforms.turbulenceStrength.value = value;
+            outerCoreMaterial.uniforms.turbulenceStrength.value = value;
+            radiativeZoneMaterial.uniforms.turbulenceStrength.value = value * 0.5;
+            photosphereMaterial.uniforms.turbulenceStrength.value = value * 1.5;
+        });
+        gui.add(params, 'gravityStrength', 0.0005, 0.01).name('Gravity Strength');
+        gui.add(params, 'fusionChance', 0.0, 0.01).name('Fusion Chance');
+
+        // 9. Animation Loop
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const delta = clock.getDelta();
+            const elapsedTime = clock.getElapsedTime();
+
+            // Update uniform time for Sun layers
+            innerCoreMaterial.uniforms.time.value = elapsedTime;
+            outerCoreMaterial.uniforms.time.value = elapsedTime;
+            radiativeZoneMaterial.uniforms.time.value = elapsedTime;
+            photosphereMaterial.uniforms.time.value = elapsedTime;
+
+            // Access particle attributes
+            const posArray = particlesGeometry.attributes.position.array;
+            const velArray = particlesGeometry.attributes.velocity.array; // Velocity array
+            const velFactors = particlesGeometry.attributes.velocityFactor.array;
+            const colorArray = particlesGeometry.attributes.color.array;
+            const ageArray = particlesGeometry.attributes.age.array;
+            const lifeArray = particlesGeometry.attributes.life.array;
+
+            for (let i = 0; i < particleCount; i++) {
+                const idx = i * 3;
+
+                // Update age
+                ageArray[i] += delta;
+                if (ageArray[i] > lifeArray[i]) {
+                    // Reset particle to a random emission point
+                    const isPhotosphere = Math.random() > 0.5;
+                    const radius = isPhotosphere ? 1.4 : 0.8;
+
+                    const theta = Math.random() * 2 * Math.PI;
+                    const phi = Math.acos(2 * Math.random() - 1);
+
+                    posArray[idx] = radius * Math.sin(phi) * Math.cos(theta);
+                    posArray[idx + 1] = radius * Math.sin(phi) * Math.sin(theta);
+                    posArray[idx + 2] = radius * Math.cos(phi);
+
+                    // Reset velocity
+                    velArray[idx] = 0.0;
+                    velArray[idx + 1] = 0.0;
+                    velArray[idx + 2] = 0.0;
+
+                    // Reset color
+                    colorArray[idx] = particleBaseColor.r;
+                    colorArray[idx + 1] = particleBaseColor.g;
+                    colorArray[idx + 2] = particleBaseColor.b;
+
+                    // Reset velocity factor
+                    velFactors[i] = 1.0;
+
+                    // Reset age and life
+                    ageArray[i] = 0.0;
+                    lifeArray[i] = 10000.0;
+
+                    continue;
+                }
+
+                // Current position
+                const x = posArray[idx];
+                const y = posArray[idx + 1];
+                const z = posArray[idx + 2];
+                const distance = Math.sqrt(x * x + y * y + z * z);
+
+                // Normalize direction
+                const dirX = x / distance;
+                const dirY = y / distance;
+                const dirZ = z / distance;
+
+                // Calculate Parker Spiral Angle
+                const omega = sunRotationRate; // radians per second (~Sun's rotation rate)
+                const V_sw = solarWindSpeed; // solar wind speed in m/s
+                const phi_spiral = Math.atan2(y, x) + (omega * distance) / V_sw;
+
+                // Update direction based on Parker spiral
+                const spiralDirX = Math.cos(phi_spiral) * dirX - Math.sin(phi_spiral) * dirY;
+                const spiralDirY = Math.sin(phi_spiral) * dirX + Math.cos(phi_spiral) * dirY;
+                const spiralDirZ = dirZ;
+
+                // Calculate acceleration based on spiral direction
+                const acceleration = params.particleSpeed * delta;
+
+                // Update velocity vectors
+                velArray[idx] += spiralDirX * acceleration;
+                velArray[idx + 1] += spiralDirY * acceleration;
+                velArray[idx + 2] += spiralDirZ * acceleration;
+
+                // Apply velocity to position
+                posArray[idx] += velArray[idx] * delta;
+                posArray[idx + 1] += velArray[idx + 1] * delta;
+                posArray[idx + 2] += velArray[idx + 2] * delta;
+
+                // Apply turbulence
+                posArray[idx] += (Math.sin(elapsedTime * 2.0 + i) * params.turbulenceStrength * 0.001);
+                posArray[idx + 1] += (Math.cos(elapsedTime * 2.0 + i) * params.turbulenceStrength * 0.001);
+                posArray[idx + 2] += (Math.sin(elapsedTime * 2.0 + i) * params.turbulenceStrength * 0.001);
+
+                // Interaction with Radiative Zone (Pressurize against gravity)
+                if (distance > 1.2 && distance < 2.0) { // Radiative Zone range
+                    // Apply a decelerating force (simulate pressure against gravity)
+                    const gravity = params.gravityStrength;
+                    velArray[idx] -= dirX * gravity * delta;
+                    velArray[idx + 1] -= dirY * gravity * delta;
+                    velArray[idx + 2] -= dirZ * gravity * delta;
+
+                    // Change particle color to indicate interaction
+                    colorArray[idx] = 1.0;
+                    colorArray[idx + 1] = 0.5;
+                    colorArray[idx + 2] = 0.0;
+                }
+
+                // Interaction with Photosphere (Dynamic Emission Booster)
+                if (distance > 1.4 && distance < 1.6) { // Photosphere range
+                    // Apply an additional accelerating boost to simulate booster effect
+                    const boost = params.particleSpeed * 2.0;
+                    velArray[idx] += spiralDirX * boost * delta;
+                    velArray[idx + 1] += spiralDirY * boost * delta;
+                    velArray[idx + 2] += spiralDirZ * boost * delta;
+
+                    // Modify velocity factor to reflect acceleration
+                    velFactors[i] = 1.5;
+
+                    // Simulate fusion event with a chance
+                    if (Math.random() < params.fusionChance) {
+                        // Change color to represent fusion (e.g., white)
+                        colorArray[idx] = 1.0;
+                        colorArray[idx + 1] = 1.0;
+                        colorArray[idx + 2] = 1.0;
+                    }
+                }
+
+                // Reset particle if it moves too far
+                if (distance > 15) { // Increased distance to prevent frequent resets
+                    // Reinitialize particle at a random emission point
+                    const isPhotosphere = Math.random() > 0.5;
+                    const radius = isPhotosphere ? 1.4 : 0.8;
+
+                    const theta = Math.random() * 2 * Math.PI;
+                    const phi = Math.acos(2 * Math.random() - 1);
+
+                    posArray[idx] = radius * Math.sin(phi) * Math.cos(theta);
+                    posArray[idx + 1] = radius * Math.sin(phi) * Math.sin(theta);
+                    posArray[idx + 2] = radius * Math.cos(phi);
+
+                    // Reset velocity
+                    velArray[idx] = 0.0;
+                    velArray[idx + 1] = 0.0;
+                    velArray[idx + 2] = 0.0;
+
+                    // Reset color
+                    colorArray[idx] = particleBaseColor.r;
+                    colorArray[idx + 1] = particleBaseColor.g;
+                    colorArray[idx + 2] = particleBaseColor.b;
+
+                    // Reset velocity factor
+                    velFactors[i] = 1.0;
+
+                    // Reset age and life
+                    ageArray[i] = 0.0;
+                    lifeArray[i] = 100.0;
+                }
+            }
+
+            // Update particle attributes
+            particlesGeometry.attributes.position.needsUpdate = true;
+            particlesGeometry.attributes.velocity.needsUpdate = true;
+            particlesGeometry.attributes.color.needsUpdate = true;
+            particlesGeometry.attributes.age.needsUpdate = true;
+
+            // Update controls
+            controls.update();
+
+            // Render the scene
+            renderer.render(scene, camera);
+        }
+
+        animate();
+
+        // 10. Responsive Design
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }, false);
+    </script>
+</body>
+</html>
